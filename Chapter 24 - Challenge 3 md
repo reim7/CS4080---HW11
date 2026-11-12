@@ -1,0 +1,446 @@
+## Solution
+
+For this challenge, I followed the proposed solution
+of changing the way native functions communicate
+with the virtual machine.
+
+In the original Chapter 24 implementation, native
+functions return a Value directly:
+
+```c
+typedef Value (*NativeFn)(int argCount, Value* args);
+```
+
+This works for successful calls, but it does not
+provide a separate way for a native function
+to indicate that something went wrong.
+
+To solve this, I would change native functions
+to return a Boolean indicating success or failure.
+
+The function's actual result or error message
+would be stored in the argument stack.
+
+## 1. Change the Native Function Type
+
+In object.h, replace the original NativeFn
+definition with:
+
+```c
+typedef bool (*NativeFn)(int argCount, Value* args);
+```
+
+Native functions now return:
+
+- true when the operation succeeds.
+- false when the operation fails.
+
+The actual result is no longer returned through
+the C function's return value.
+
+Instead, it is stored in the stack position
+immediately before the first argument.
+
+That position can be accessed using:
+
+```c
+args[-1]
+```
+
+This slot originally contains the native function
+being called.
+
+Once the native function finishes, the VM can
+reuse that slot to store the result.
+
+## 2. Update clockNative()
+
+Chapter 24 introduces clock() as a native function.
+
+Originally, it returns a Value directly.
+
+I would update it in vm.c:
+
+```c
+static bool clockNative(int argCount, Value* args) {
+  args[-1] =
+      NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+
+  return true;
+}
+```
+
+The function now stores its result in args[-1]
+and returns true to indicate success.
+
+The visible behavior of clock() in Lox does not
+change.
+
+For example:
+
+```lox
+print clock();
+```
+
+The function should still return a numeric
+time value.
+
+## 3. Create a Native Function That Reports an Error
+
+To demonstrate runtime error reporting, I would
+create a native function that deliberately fails.
+
+In vm.c:
+
+```c
+static bool errNative(int argCount, Value* args) {
+  args[-1] = OBJ_VAL(copyString("Error!", 6));
+  return false;
+}
+```
+
+Instead of returning a normal value, this function
+places a string containing the error message
+in args[-1].
+
+It then returns false.
+
+This tells the VM that the native call failed
+and the stored string should be reported as
+a runtime error.
+
+## 4. Update callValue()
+
+The most important change is in the OBJ_NATIVE
+case of callValue() in vm.c.
+
+Following the proposed solution, the VM checks
+the Boolean result of the native function.
+
+The following version also preserves the arity
+checking from Challenge 2:
+
+```c
+case OBJ_NATIVE: {
+  ObjNative* native = (ObjNative*)AS_OBJ(callee);
+
+  if (argCount != native->arity) {
+    runtimeError("Expected %d arguments but got %d.",
+                 native->arity, argCount);
+    return false;
+  }
+
+  Value* args = vm.stackTop - argCount;
+
+  if (native->function(argCount, args)) {
+    // The result is already stored in args[-1].
+    vm.stackTop -= argCount;
+    return true;
+  } else {
+    // The native function stored an error string.
+    Value error = args[-1];
+
+    if (!IS_STRING(error)) {
+      runtimeError("Native function failed.");
+    } else {
+      runtimeError("%s", AS_CSTRING(error));
+    }
+
+    return false;
+  }
+}
+```
+
+When the native function succeeds, the VM removes
+the argument slots while keeping the result
+already stored in the original callee slot.
+
+When the native function fails, the VM reads
+the error message and reports it using
+runtimeError().
+
+The error message is passed using "%s" rather
+than being used directly as a format string.
+
+This prevents characters such as percent signs
+inside the message from being interpreted
+as formatting instructions.
+
+This implementation assumes that a failing
+native function stores a valid Lox string
+in args[-1].
+
+## 5. Register the Error Function
+
+Using the updated defineNative() from Challenge 2,
+the new function can be registered in initVM():
+
+```c
+defineNative("err", errNative, 0);
+```
+
+The arity is zero because err() does not require
+any arguments.
+
+A Lox program can now call:
+
+```lox
+err();
+```
+
+Expected runtime error:
+
+```text
+Error!
+```
+
+The VM should also display the corresponding
+stack trace, following the behavior introduced
+in Chapter 24.
+
+This is the expected behavior, not a recorded
+test execution.
+
+## 6. Example: Handling Invalid Argument Types
+
+A more practical example would be a mathematical
+native function that checks the type of its argument.
+
+For example, I would add a square root function.
+
+The C implementation could be:
+
+```c
+static bool sqrtNative(int argCount, Value* args) {
+  if (!IS_NUMBER(args[0])) {
+    args[-1] = OBJ_VAL(
+        copyString("sqrt() expects a number.", 24));
+    return false;
+  }
+
+  double number = AS_NUMBER(args[0]);
+
+  if (number < 0) {
+    args[-1] = OBJ_VAL(
+        copyString("sqrt() requires a nonnegative number.",
+                   37));
+    return false;
+  }
+
+  args[-1] = NUMBER_VAL(sqrt(number));
+  return true;
+}
+```
+
+This example requires math.h to use the C sqrt()
+function.
+
+The string lengths passed to copyString()
+must match the actual message lengths. In a
+complete implementation, I would use a helper
+that calculates these lengths automatically
+to avoid mistakes.
+
+The function would be registered with:
+
+```c
+defineNative("sqrt", sqrtNative, 1);
+```
+
+### Valid Call
+
+```lox
+print sqrt(25);
+```
+
+Expected output:
+
+```text
+5
+```
+
+### Invalid Argument Type
+
+```lox
+print sqrt("hello");
+```
+
+Expected runtime error:
+
+```text
+sqrt() expects a number.
+```
+
+### Invalid Numeric Value
+
+```lox
+print sqrt(-9);
+```
+
+Expected runtime error:
+
+```text
+sqrt() requires a nonnegative number.
+```
+
+These examples show why error reporting is
+important for native functions.
+
+Arity checking alone cannot verify whether
+the provided arguments have appropriate types
+or values.
+
+## 7. Error Handling and Stack Management
+
+The original Chapter 24 native function interface
+returned a Value directly.
+
+After calling the function, the VM removed the
+callee and argument slots and pushed the result.
+
+With the new interface, the native function writes
+its result directly into args[-1].
+
+This means the VM can leave the result in place
+and discard only the argument slots.
+
+On failure, the native function writes an error
+string into the same position.
+
+The VM then reports the error and stops execution.
+
+This design provides two separate communication
+paths:
+
+1. The C return value indicates success or failure.
+2. The argument stack holds the result or error message.
+
+The VM should not continue normal execution after
+a native call reports failure.
+
+## 8. Interaction With Challenge 1
+
+In Chapter 24, Challenge 1, the instruction
+pointer was cached in a local C variable.
+
+When a native function reports an error,
+the VM needs an accurate instruction pointer
+to display the correct stack trace.
+
+The OP_CALL instruction should therefore save
+the current instruction pointer before
+calling callValue().
+
+For example:
+
+```c
+case OP_CALL: {
+  int argCount = READ_BYTE();
+
+  frame->ip = ip;
+
+  if (!callValue(peek(argCount), argCount)) {
+    return INTERPRET_RUNTIME_ERROR;
+  }
+
+  frame = &vm.frames[vm.frameCount - 1];
+  ip = frame->ip;
+  break;
+}
+```
+
+This ensures that native function errors
+can be associated with the correct location
+in the Lox program.
+
+## 9. Performance Considerations
+
+Adding runtime error reporting introduces
+additional control flow into native calls.
+
+Previously, a native function simply returned
+its result as a Value.
+
+With the new approach, the VM must check
+whether the native function succeeded
+before continuing execution.
+
+This introduces an additional branch in
+the native call path.
+
+The actual performance impact depends on
+the native function, the compiler, the
+hardware, and how frequently native
+functions are called.
+
+For very simple native functions, the
+additional check may represent a more
+noticeable portion of the total call cost.
+
+For native functions that perform more
+substantial work, the relative overhead
+may be less important.
+
+The new calling convention may also
+avoid some stack operations because
+the result is written directly into
+the existing callee slot.
+
+However, I have not collected benchmark
+measurements, so I cannot determine
+whether the overall implementation is
+faster or slower in practice.
+
+## 10. Is the Added Complexity Worth It?
+
+I think supporting runtime errors in
+native functions is worth the additional
+complexity.
+
+Without error reporting, native functions
+cannot safely communicate problems such
+as incorrect argument types or invalid
+numeric values.
+
+Since Lox is dynamically typed, these
+situations may only become apparent
+when the program runs.
+
+Allowing native functions to report errors
+makes the language more reliable and
+provides programmers with clearer feedback.
+
+Although the additional checks could
+affect performance, I think correctness
+and error handling are more important.
+
+## Conclusion
+
+For this challenge, I extended the proposed
+native function system so that native
+functions can report runtime errors.
+
+I changed NativeFn to return a Boolean,
+updated native functions to store their
+results in args[-1], and modified
+callValue() to distinguish successful
+calls from failures.
+
+I also included examples demonstrating
+how native functions could report
+invalid argument types and values.
+
+This approach allows native functions
+to communicate errors to the VM while
+preserving the normal behavior of
+successful calls.
+
+I have not run performance benchmarks,
+so I cannot make a definite claim about
+the performance impact.
+
+These are proposed implementation changes
+based on Chapter 24 and the uploaded
+solution. They have not been integrated
+into or tested against the complete
+clox source code.
