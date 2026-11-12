@@ -1,0 +1,534 @@
+## Solution
+
+For this challenge, I followed the proposed
+optimization of storing the instruction pointer
+in a local variable inside the VM's run() function.
+
+In the original implementation, each CallFrame
+contains an instruction pointer, which tracks
+the next bytecode instruction to execute.
+
+The VM accesses this pointer using:
+
+```c
+frame->ip
+```
+
+Since the VM reads instructions constantly, this
+access happens repeatedly during execution.
+
+To reduce this overhead, I would cache the
+instruction pointer in a local variable and
+use it directly when reading bytecode.
+
+The compiler may be able to keep this local
+variable in a CPU register, reducing repeated
+memory accesses.
+
+## 1. Store ip in a Local Variable
+
+In vm.c, modify the beginning of run():
+
+```c
+static InterpretResult run() {
+  CallFrame* frame = &vm.frames[vm.frameCount - 1];
+
+  register uint8_t* ip = frame->ip;
+```
+
+The new ip variable stores the current
+instruction pointer.
+
+The register keyword suggests that the C
+compiler should keep the variable in a
+CPU register when possible.
+
+Modern compilers are free to make their own
+register allocation decisions, so the
+keyword does not guarantee this optimization.
+
+## 2. Update the Bytecode Reading Macros
+
+Originally, the VM reads bytecode through
+the CallFrame:
+
+```c
+#define READ_BYTE() (*frame->ip++)
+```
+
+I would change the macros to use the local
+instruction pointer:
+
+```c
+#define READ_BYTE() (*ip++)
+
+#define READ_SHORT() \
+    (ip += 2, \
+    (uint16_t)((ip[-2] << 8) | ip[-1]))
+```
+
+READ_BYTE() now retrieves an instruction
+and advances the local ip variable.
+
+READ_SHORT() reads a two-byte operand
+and advances ip by two bytes.
+
+READ_CONSTANT() can continue using
+READ_BYTE() to retrieve its operand.
+
+This reduces the need to repeatedly access
+the instruction pointer through frame->ip.
+
+## 3. Update Jump Instructions
+
+The VM uses jump instructions to change
+the flow of execution.
+
+These instructions must now update the
+local ip variable instead of frame->ip.
+
+In vm.c:
+
+```c
+case OP_JUMP: {
+  uint16_t offset = READ_SHORT();
+  ip += offset;
+  break;
+}
+
+case OP_JUMP_IF_FALSE: {
+  uint16_t offset = READ_SHORT();
+
+  if (isFalsey(peek(0))) {
+    ip += offset;
+  }
+
+  break;
+}
+
+case OP_LOOP: {
+  uint16_t offset = READ_SHORT();
+  ip -= offset;
+  break;
+}
+```
+
+OP_JUMP moves forward unconditionally.
+
+OP_JUMP_IF_FALSE moves forward only
+when the condition is falsey.
+
+OP_LOOP moves backward to repeat
+a section of bytecode.
+
+These instructions continue working
+the same way, but they now modify
+the cached instruction pointer.
+
+## 4. Synchronize ip During Function Calls
+
+One important issue with this optimization
+is keeping the cached instruction pointer
+synchronized with the current CallFrame.
+
+When the VM calls a function, it switches
+to a different CallFrame.
+
+Before making that switch, the current ip
+must be saved so execution can resume
+at the correct location when the
+called function returns.
+
+Update OP_CALL:
+
+```c
+case OP_CALL: {
+  int argCount = READ_BYTE();
+
+  // Save the caller's instruction pointer.
+  frame->ip = ip;
+
+  if (!callValue(peek(argCount), argCount)) {
+    return INTERPRET_RUNTIME_ERROR;
+  }
+
+  // Load the current frame and its ip.
+  frame = &vm.frames[vm.frameCount - 1];
+  ip = frame->ip;
+
+  break;
+}
+```
+
+Saving frame->ip before the call is
+important because the VM needs to
+remember where execution should
+continue afterward.
+
+If callValue() creates a new CallFrame,
+the VM loads that frame's instruction
+pointer into the local variable.
+
+If a native function executes without
+creating a new CallFrame, reloading
+the existing frame is still valid.
+
+## 5. Synchronize ip When Returning
+
+When a function returns, the VM
+removes the current CallFrame and
+resumes execution in its caller.
+
+The instruction pointer must therefore
+be loaded from the caller's CallFrame.
+
+The relevant OP_RETURN implementation
+becomes:
+
+```c
+case OP_RETURN: {
+  Value result = pop();
+  vm.frameCount--;
+
+  if (vm.frameCount == 0) {
+    pop();
+    return INTERPRET_OK;
+  }
+
+  vm.stackTop = frame->slots;
+  push(result);
+
+  // Restore the caller's CallFrame.
+  frame = &vm.frames[vm.frameCount - 1];
+
+  // Restore the caller's instruction pointer.
+  ip = frame->ip;
+
+  break;
+}
+```
+
+This allows execution to continue
+immediately after the original
+function call.
+
+Without this step, the VM might
+continue reading bytecode from the
+wrong function.
+
+## 6. Synchronize ip Before Runtime Errors
+
+The instruction pointer is also
+important when reporting errors.
+
+Chapter 24 explains that the VM
+uses each CallFrame's instruction
+pointer to identify the source
+line where an error occurred.
+
+Since the local ip variable may
+have advanced beyond frame->ip,
+the current value must be stored
+before reporting a runtime error.
+
+For example, in OP_GET_GLOBAL:
+
+```c
+case OP_GET_GLOBAL: {
+  ObjString* name = READ_STRING();
+  Value value;
+
+  if (!tableGet(&vm.globals, name, &value)) {
+    frame->ip = ip;
+
+    runtimeError("Undefined variable '%s'.",
+                 name->chars);
+
+    return INTERPRET_RUNTIME_ERROR;
+  }
+
+  push(value);
+  break;
+}
+```
+
+The same synchronization is required
+before other runtime errors.
+
+Examples include:
+
+- Accessing an undefined global.
+- Assigning to an undefined global.
+- Performing arithmetic on invalid types.
+- Adding incompatible values.
+- Negating a non-number.
+
+The BINARY_OP macro must also save
+the current ip before reporting a
+numeric operand error.
+
+For example:
+
+```c
+#define BINARY_OP(valueType, op) \
+  do { \
+    if (!IS_NUMBER(peek(0)) || \
+        !IS_NUMBER(peek(1))) { \
+      frame->ip = ip; \
+      runtimeError("Operands must be numbers."); \
+      return INTERPRET_RUNTIME_ERROR; \
+    } \
+    double b = AS_NUMBER(pop()); \
+    double a = AS_NUMBER(pop()); \
+    push(valueType(a op b)); \
+  } while (false)
+```
+
+Other runtimeError() call sites inside
+run() should follow the same rule.
+
+These extra assignments happen only
+on error paths, so they do not add
+unnecessary work during successful
+arithmetic and variable access.
+
+## 7. Update Debug Instruction Tracing
+
+If DEBUG_TRACE_EXECUTION is enabled,
+the disassembler should use the
+current local instruction pointer.
+
+The relevant call becomes:
+
+```c
+disassembleInstruction(
+    &frame->function->chunk,
+    (int)(ip - frame->function->chunk.code));
+```
+
+This allows the debug output to show
+the instruction currently being executed
+rather than using a possibly outdated
+instruction pointer stored in the frame.
+
+## 8. Benchmark 1: Recursive Fibonacci
+
+The first benchmark focuses on
+function calls and returns.
+
+```lox
+fun fib(n) {
+  if (n < 2) return n;
+
+  return fib(n - 2) + fib(n - 1);
+}
+
+var start = clock();
+
+print fib(30);
+
+print clock() - start;
+```
+
+Expected Fibonacci result:
+
+```text
+832040
+```
+
+The final printed number is the
+elapsed CPU time in seconds.
+
+That timing varies depending on the
+machine and compiler settings.
+
+I chose this benchmark because recursive
+Fibonacci generates many function calls
+and returns.
+
+This makes it useful for testing both
+instruction pointer access and the
+synchronization required when switching
+CallFrames.
+
+## 9. Benchmark 2: Loop Execution
+
+The second benchmark tests repeated
+bytecode execution with fewer function
+calls.
+
+```lox
+var start = clock();
+
+var total = 0;
+var i = 0;
+
+while (i < 1000000) {
+  total = total + i;
+  i = i + 1;
+}
+
+print total;
+print clock() - start;
+```
+
+Expected sum:
+
+```text
+499999500000
+```
+
+The final printed value is again the
+measured CPU time.
+
+I chose this benchmark because loops
+repeatedly execute instructions such
+as OP_GET_GLOBAL, OP_SET_GLOBAL,
+OP_ADD, and OP_LOOP.
+
+It helps evaluate whether caching ip
+improves ordinary bytecode execution
+in addition to function-heavy programs.
+
+## 10. Benchmarking Method
+
+To evaluate the optimization fairly,
+I would compare two versions of clox:
+
+1. The original Chapter 24 VM using
+   frame->ip directly.
+
+2. The optimized VM using a local
+   register ip variable.
+
+Both versions should be compiled
+with the same compiler and
+optimization settings.
+
+Debug instruction tracing should
+be disabled for the timing tests.
+
+I would run each benchmark several
+times and compare the median
+execution times to reduce noise.
+
+The percentage improvement can
+be calculated as:
+
+```text
+Improvement (%) =
+    ((original time - optimized time)
+     / original time) * 100
+```
+
+## 11. Performance Results and Expectations
+
+Caching the instruction pointer in a local C variable
+could improve performance by reducing repeated
+accesses through the CallFrame pointer.
+
+Since the VM reads the instruction pointer frequently
+during bytecode execution, reducing this overhead
+may help the interpreter execute instructions more
+efficiently.
+
+However, the actual performance improvement would
+depend on several factors, including the compiler,
+hardware, optimization settings, and the type of
+program being executed.
+
+The Fibonacci benchmark would help evaluate the
+optimization during frequent function calls and
+returns, while the loop benchmark would help
+measure its effect during repeated bytecode execution.
+
+I have not run these benchmarks or collected
+actual timing measurements, so I cannot determine
+how much faster the optimized implementation
+would be.
+
+## 12. Is the Added Complexity Worth It?
+
+I think this optimization could be worthwhile
+because the instruction pointer is accessed
+so frequently during execution.
+
+However, the optimization also makes the VM
+more complicated because the cached instruction
+pointer must be synchronized during function
+calls, returns, and runtime errors.
+
+If that synchronization is handled incorrectly,
+the VM could execute the wrong instructions
+or produce inaccurate stack traces.
+
+Overall, I think the optimization is worth
+exploring, but I would want to run benchmarks
+before deciding whether the performance benefit
+justifies the additional complexity.
+
+## 12. Is the Added Complexity Worth It?
+
+I think this optimization is worthwhile
+because the instruction pointer is
+accessed during almost every
+bytecode instruction.
+
+Even a relatively small improvement
+to such a frequently used operation
+can have a noticeable effect on
+overall performance.
+
+The main disadvantage is that the
+compiler and VM code become slightly
+more complicated.
+
+We must remember to synchronize the
+cached instruction pointer whenever
+the active CallFrame changes and before
+runtime errors are reported.
+
+If this synchronization is handled
+incorrectly, the VM could resume
+execution at the wrong instruction
+or produce inaccurate stack traces.
+
+However, the changes are still
+reasonably localized to run().
+
+Based on the proposed solution's
+reported performance improvement,
+I think the optimization offers
+a reasonable trade-off.
+
+## Conclusion
+
+For this challenge, I optimized the
+proposed clox VM by caching the
+instruction pointer in a local
+register variable.
+
+I updated the instruction-reading
+macros, jump instructions, function
+calls, returns, runtime error handling,
+and debug tracing to use the
+cached instruction pointer.
+
+I also designed two benchmarks:
+recursive Fibonacci and repeated
+loop execution.
+
+The provided solution reports an
+approximately 8.5% speedup for
+Fibonacci on its author's machine,
+but I have not independently
+verified that result.
+
+Overall, I think this optimization
+is worth considering because it
+targets an operation performed
+throughout bytecode execution.
+
+The implementation and benchmarks
+have not been compiled or executed
+as part of this submission.
