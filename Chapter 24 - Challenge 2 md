@@ -1,0 +1,375 @@
+## Solution
+
+For this challenge, I would modify clox so that native
+functions store their expected number of arguments,
+similar to regular Lox functions.
+
+In Chapter 24, regular functions use an arity field
+to track how many parameters they expect.
+
+When a regular function is called, clox compares
+the number of supplied arguments with the function's
+arity and reports a runtime error if they do not match.
+
+However, the original native function implementation
+does not perform the same validation.
+
+To fix this, I would add an arity field to ObjNative
+and check the argument count before executing the
+native C function.
+
+## 1. Add an Arity Field to ObjNative
+
+In object.h, the original native function structure is:
+
+```c
+typedef struct {
+  Obj obj;
+  NativeFn function;
+} ObjNative;
+```
+
+I would change it to:
+
+```c
+typedef struct {
+  Obj obj;
+  int arity;
+  NativeFn function;
+} ObjNative;
+```
+
+The new arity field stores the number of arguments
+the native function expects.
+
+This allows the interpreter to check the argument
+count before executing the function.
+
+## 2. Update the Native Function Constructor
+
+The original newNative() function only receives
+a pointer to the C function.
+
+I would update its declaration in object.h:
+
+```c
+ObjNative* newNative(NativeFn function, int arity);
+```
+
+Then update the implementation in object.c:
+
+```c
+ObjNative* newNative(NativeFn function, int arity) {
+  ObjNative* native =
+      ALLOCATE_OBJ(ObjNative, OBJ_NATIVE);
+
+  native->function = function;
+  native->arity = arity;
+
+  return native;
+}
+```
+
+Whenever a native function object is created,
+its expected argument count is stored alongside
+its function pointer.
+
+## 3. Update defineNative()
+
+Chapter 24 introduces defineNative() to register
+native C functions as global variables in Lox.
+
+The original function takes a name and a
+function pointer.
+
+I would extend it to accept the expected arity.
+
+In vm.c:
+
+```c
+static void defineNative(const char* name,
+                         NativeFn function,
+                         int arity) {
+  push(OBJ_VAL(copyString(name,
+                          (int)strlen(name))));
+
+  push(OBJ_VAL(newNative(function, arity)));
+
+  tableSet(&vm.globals,
+           AS_STRING(vm.stack[0]),
+           vm.stack[1]);
+
+  pop();
+  pop();
+}
+```
+
+The main change is passing arity to newNative()
+when creating the native function object.
+
+The existing stack operations are preserved
+because Chapter 24 uses them to keep allocated
+objects reachable during registration.
+
+## 4. Register Native Functions With Their Arity
+
+The clock() function introduced in Chapter 24
+does not require any arguments.
+
+Therefore, its arity should be zero.
+
+In initVM(), change:
+
+```c
+defineNative("clock", clockNative);
+```
+
+To:
+
+```c
+defineNative("clock", clockNative, 0);
+```
+
+This means the following Lox code should work:
+
+```lox
+print clock();
+```
+
+However, calling clock with an argument should
+produce a runtime error:
+
+```lox
+print clock(10);
+```
+
+Expected error:
+
+```text
+Expected 0 arguments but got 1.
+```
+
+## 5. Add Arity Validation to callValue()
+
+This is the most important part of the solution.
+
+In Chapter 24, callValue() determines whether the
+value being called represents a regular Lox function
+or a native function.
+
+For native functions, it currently calls the C
+function without checking its argument count.
+
+I would update the OBJ_NATIVE case in vm.c:
+
+```c
+case OBJ_NATIVE: {
+  ObjNative* native = (ObjNative*)AS_OBJ(callee);
+
+  if (argCount != native->arity) {
+    runtimeError("Expected %d arguments but got %d.",
+                 native->arity, argCount);
+    return false;
+  }
+
+  Value result =
+      native->function(argCount,
+                       vm.stackTop - argCount);
+
+  vm.stackTop -= argCount + 1;
+  push(result);
+
+  return true;
+}
+```
+
+The VM now compares the supplied argument count
+with the native function's expected arity.
+
+If the values do not match, it reports a
+runtime error and does not execute the
+native C function.
+
+If the counts match, the native function
+executes normally.
+
+This prevents native functions from accessing
+missing arguments through their argument array.
+
+## 6. Interaction With Instruction Pointer Optimization
+
+If this challenge is combined with Chapter 24,
+Challenge 1, the VM must save the current
+instruction pointer before reporting a runtime
+error.
+
+In Challenge 1, the instruction pointer was
+cached in a local variable for efficiency.
+
+The OP_CALL implementation saves that pointer
+before calling callValue().
+
+For example:
+
+```c
+case OP_CALL: {
+  int argCount = READ_BYTE();
+
+  frame->ip = ip;
+
+  if (!callValue(peek(argCount), argCount)) {
+    return INTERPRET_RUNTIME_ERROR;
+  }
+
+  frame = &vm.frames[vm.frameCount - 1];
+  ip = frame->ip;
+  break;
+}
+```
+
+This keeps the runtime error and stack trace
+information consistent when an incorrect
+native function call occurs.
+
+## 7. Example: A Native Function With Two Arguments
+
+To demonstrate that the new system works
+with functions other than clock(), I would
+add a simple native function called add().
+
+In vm.c:
+
+```c
+static Value addNative(int argCount, Value* args) {
+  return NUMBER_VAL(
+      AS_NUMBER(args[0]) + AS_NUMBER(args[1]));
+}
+```
+
+Then register it:
+
+```c
+defineNative("add", addNative, 2);
+```
+
+This tells clox that add() expects exactly
+two arguments.
+
+Note that this example assumes both arguments
+are numbers. Checking argument types would
+require additional validation, which is
+separate from the arity-checking requirement.
+
+### Correct Number of Arguments
+
+```lox
+print add(5, 7);
+```
+
+Expected output:
+
+```text
+12
+```
+
+### Too Few Arguments
+
+```lox
+print add(5);
+```
+
+Expected runtime error:
+
+```text
+Expected 2 arguments but got 1.
+```
+
+### Too Many Arguments
+
+```lox
+print add(5, 7, 10);
+```
+
+Expected runtime error:
+
+```text
+Expected 2 arguments but got 3.
+```
+
+These errors should occur before addNative()
+attempts to access its arguments.
+
+## 8. Why Arity Checking Is Important
+
+Without arity checking, a native function might
+attempt to access arguments outside the range
+that was supplied by the caller.
+
+For example, addNative() expects two values
+and accesses args[0] and args[1].
+
+If the user calls add(5), only one argument
+has been supplied.
+
+Without checking the arity, accessing args[1]
+would not be valid.
+
+This could cause incorrect behavior or
+potentially unsafe memory access.
+
+By checking the argument count before executing
+the function, clox can report a meaningful
+runtime error instead.
+
+## 9. Performance Considerations
+
+Arity checking introduces an additional
+comparison every time a native function is called.
+
+This creates a small amount of extra work
+compared with directly invoking the C function.
+
+However, it also prevents invalid calls
+from reaching the native implementation.
+
+The actual performance impact would depend
+on how frequently native functions are called,
+the complexity of each native function, and
+the compiler and hardware being used.
+
+For simple native functions that perform
+very little work, the additional comparison
+could represent a larger portion of the
+overall call overhead.
+
+For more expensive native functions,
+the relative cost may be smaller.
+
+I have not run performance benchmarks,
+so I cannot determine the actual
+performance difference.
+
+## 10. Conclusion
+
+For this challenge, I added arity checking
+to the proposed native function system
+in clox.
+
+The main changes include adding an arity
+field to ObjNative, updating newNative()
+and defineNative(), and validating the
+argument count inside callValue().
+
+This allows native functions to reject
+calls with too many or too few arguments
+before executing their underlying C code.
+
+Although the additional check introduces
+some runtime overhead, I think it is
+worthwhile because it improves the
+reliability and safety of native function calls.
+
+The examples illustrate the proposed
+implementation. They have not been
+compiled or tested against the complete
+clox source code.
