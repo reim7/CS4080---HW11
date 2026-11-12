@@ -1,0 +1,570 @@
+## Solution
+
+For this challenge, I would extend clox by
+adding four native functions:
+
+1. sqrt() – Calculates the square root of a number.
+2. abs() – Returns the absolute value of a number.
+3. min() – Returns the smaller of two numbers.
+4. length() – Returns the number of characters in a string.
+
+I chose these functions because they provide
+operations that programmers commonly need.
+
+Chapter 24 explains how native functions allow
+Lox programs to access functionality implemented
+in C.
+
+This is useful because Lox does not need to
+implement every operation directly in its
+bytecode instruction set.
+
+Instead, native functions make existing C
+functionality available to Lox programs.
+
+For this solution, I would also preserve the
+arity checking from Challenge 2 and runtime
+error handling from Challenge 3.
+
+## 1. Include the Necessary C Libraries
+
+In vm.c, add:
+
+```c
+#include <math.h>
+#include <string.h>
+```
+
+math.h provides mathematical operations such
+as sqrt() and fabs().
+
+string.h provides strlen(), which can be used
+when constructing error messages.
+
+The Lox string object already stores its
+length, so the length() native function can
+retrieve that directly.
+
+## 2. Native Function Error Helper
+
+In Challenge 3, I changed NativeFn so it
+returns a Boolean indicating success or failure.
+
+The result or error message is written to
+args[-1].
+
+The function type in object.h is:
+
+```c
+typedef bool (*NativeFn)(int argCount, Value* args);
+```
+
+To avoid repeating the same error-handling
+code, I would create a helper function.
+
+In vm.c:
+
+```c
+static bool nativeError(Value* args,
+                        const char* message) {
+  args[-1] = OBJ_VAL(
+      copyString(message, (int)strlen(message)));
+
+  return false;
+}
+```
+
+This stores an error message in the expected
+stack position and returns false.
+
+The VM can then report the error using the
+updated callValue() implementation from
+Challenge 3.
+
+## 3. Add sqrt()
+
+The first function calculates the square root
+of a number.
+
+It expects exactly one numeric argument.
+
+In vm.c:
+
+```c
+static bool sqrtNative(int argCount, Value* args) {
+  if (!IS_NUMBER(args[0])) {
+    return nativeError(
+        args, "sqrt() expects a number.");
+  }
+
+  double number = AS_NUMBER(args[0]);
+
+  if (number < 0) {
+    return nativeError(
+        args,
+        "sqrt() requires a nonnegative number.");
+  }
+
+  args[-1] = NUMBER_VAL(sqrt(number));
+  return true;
+}
+```
+
+The function first checks that the argument
+is a number.
+
+It also rejects negative numbers because
+this implementation returns real-valued
+square roots.
+
+If the argument is valid, it calculates
+the square root and stores the result
+in args[-1].
+
+The function returns true to indicate success.
+
+### Lox Example
+
+```lox
+print sqrt(25);
+print sqrt(81);
+print sqrt(144);
+```
+
+Expected output:
+
+```text
+5
+9
+12
+```
+
+### Invalid Argument Example
+
+```lox
+print sqrt("hello");
+```
+
+Expected runtime error:
+
+```text
+sqrt() expects a number.
+```
+
+## 4. Add abs()
+
+The second function calculates the absolute
+value of a number.
+
+This is useful when working with distances,
+differences, and calculations where the sign
+of a number should be ignored.
+
+In vm.c:
+
+```c
+static bool absNative(int argCount, Value* args) {
+  if (!IS_NUMBER(args[0])) {
+    return nativeError(
+        args, "abs() expects a number.");
+  }
+
+  double number = AS_NUMBER(args[0]);
+
+  args[-1] = NUMBER_VAL(fabs(number));
+  return true;
+}
+```
+
+The function uses the C standard library's
+fabs() function to calculate the absolute
+value of a double.
+
+### Lox Example
+
+```lox
+print abs(-15);
+print abs(8);
+print abs(-3.5);
+```
+
+Expected output:
+
+```text
+15
+8
+3.5
+```
+
+### Invalid Argument Example
+
+```lox
+print abs("negative");
+```
+
+Expected runtime error:
+
+```text
+abs() expects a number.
+```
+
+## 5. Add min()
+
+The third function returns the smaller of
+two numbers.
+
+I chose this because comparing numbers is
+a common programming task.
+
+Instead of writing a conditional statement
+every time, programmers could use min().
+
+In vm.c:
+
+```c
+static bool minNative(int argCount, Value* args) {
+  if (!IS_NUMBER(args[0]) ||
+      !IS_NUMBER(args[1])) {
+    return nativeError(
+        args, "min() expects two numbers.");
+  }
+
+  double a = AS_NUMBER(args[0]);
+  double b = AS_NUMBER(args[1]);
+
+  args[-1] = NUMBER_VAL(a < b ? a : b);
+  return true;
+}
+```
+
+This function expects exactly two arguments.
+
+It checks that both arguments are numbers
+before comparing them.
+
+### Lox Example
+
+```lox
+print min(10, 5);
+print min(-3, 7);
+print min(4.5, 2.5);
+```
+
+Expected output:
+
+```text
+5
+-3
+2.5
+```
+
+### Invalid Argument Example
+
+```lox
+print min(10, "five");
+```
+
+Expected runtime error:
+
+```text
+min() expects two numbers.
+```
+
+## 6. Add length()
+
+The fourth function returns the number
+of characters in a string.
+
+Strings already have a length field
+in their ObjString structure.
+
+This makes the native implementation
+relatively simple.
+
+In vm.c:
+
+```c
+static bool lengthNative(int argCount, Value* args) {
+  if (!IS_STRING(args[0])) {
+    return nativeError(
+        args, "length() expects a string.");
+  }
+
+  ObjString* string = AS_STRING(args[0]);
+
+  args[-1] = NUMBER_VAL(string->length);
+  return true;
+}
+```
+
+The function checks whether the argument
+is a string.
+
+If it is, the function reads the stored
+length and returns it as a Lox number.
+
+The stored length counts bytes, so for
+UTF-8 text containing multibyte characters,
+the result is not necessarily the number
+of Unicode characters.
+
+### Lox Example
+
+```lox
+print length("hello");
+print length("Lox");
+print length("");
+```
+
+Expected output:
+
+```text
+5
+3
+0
+```
+
+### Invalid Argument Example
+
+```lox
+print length(123);
+```
+
+Expected runtime error:
+
+```text
+length() expects a string.
+```
+
+## 7. Register the Native Functions
+
+Chapter 24 uses defineNative() to make
+C functions available to Lox programs.
+
+Using the updated definition from
+Challenge 2, I would register each
+function with its expected arity.
+
+In initVM():
+
+```c
+defineNative("sqrt", sqrtNative, 1);
+defineNative("abs", absNative, 1);
+defineNative("min", minNative, 2);
+defineNative("length", lengthNative, 1);
+```
+
+The final argument specifies how many
+parameters each function expects.
+
+For example, sqrt() requires one argument,
+while min() requires two.
+
+If a user supplies the wrong number
+of arguments, the arity checking from
+Challenge 2 reports a runtime error
+before the native function executes.
+
+The existing clock() function should
+also remain registered.
+
+For example:
+
+```c
+defineNative("clock", clockNative, 0);
+```
+
+## 8. Example Program: Working With Numbers
+
+The following Lox program demonstrates
+how the new mathematical functions
+can be used together.
+
+```lox
+var x = -16;
+var y = 25;
+
+print abs(x);
+print sqrt(y);
+print min(abs(x), sqrt(y));
+```
+
+Expected output:
+
+```text
+16
+5
+5
+```
+
+This demonstrates function composition.
+
+One native function can return a value
+that is passed as an argument to another.
+
+This makes the language more expressive
+without requiring additional bytecode
+instructions for each mathematical
+operation.
+
+## 9. Example Program: Comparing Scores
+
+The min() function could also simplify
+calculations involving multiple values.
+
+```lox
+var score1 = 85;
+var score2 = 92;
+var score3 = 78;
+
+var lowest = min(score1, score2);
+lowest = min(lowest, score3);
+
+print lowest;
+```
+
+Expected output:
+
+```text
+78
+```
+
+Instead of writing multiple if statements,
+the program uses min() to identify the
+lowest score.
+
+## 10. Example Program: Checking String Length
+
+The length() function can be useful
+when checking whether a string meets
+a specific requirement.
+
+For example:
+
+```lox
+var username = "student123";
+
+if (length(username) < 5) {
+  print "Username is too short.";
+} else {
+  print "Username length is acceptable.";
+}
+```
+
+Expected output:
+
+```text
+Username length is acceptable.
+```
+
+This shows how the function can be
+combined with the conditional statements
+introduced in Chapter 23.
+
+## 11. How These Functions Improve Lox
+
+Adding these native functions makes
+Lox more practical in several ways.
+
+First, the mathematical functions allow
+programmers to perform common calculations
+without manually implementing them.
+
+The sqrt() function supports square
+root calculations, while abs() and
+min() simplify numeric operations.
+
+Second, the length() function gives
+programmers a way to examine strings.
+
+This could be useful for validating
+input, checking text lengths, or
+processing string data.
+
+Third, these functions demonstrate
+how Lox can use C functionality without
+requiring the language itself to support
+every operation as a bytecode instruction.
+
+They also show how native functions
+can be combined with existing Lox
+features, including variables,
+expressions, and conditional statements.
+
+## 12. Error Handling
+
+The new native functions use the
+error-handling approach from Challenge 3.
+
+If a function receives an argument
+of the wrong type, it stores an error
+message in args[-1] and returns false.
+
+The VM then reports the error and
+stops execution.
+
+Challenge 2 also provides arity
+checking, which prevents functions
+from accessing arguments that were
+not supplied.
+
+Together, these changes improve
+the reliability of the native
+function system.
+
+## 13. Performance Considerations
+
+Native functions allow clox to
+execute operations implemented in C.
+
+This can be useful for operations
+that would otherwise require more
+complicated Lox code.
+
+However, every native call still
+has some overhead associated with
+argument handling and validation.
+
+The actual performance depends
+on the complexity of the operation,
+the implementation of the VM,
+and the hardware being used.
+
+I have not collected benchmark
+results, so I cannot determine
+how much faster or slower these
+functions would be compared with
+alternative implementations.
+
+## Conclusion
+
+For this challenge, I added four
+proposed native functions to clox:
+sqrt(), abs(), min(), and length().
+
+I chose these functions because
+they provide useful mathematical
+and string operations that make
+Lox easier to use for common tasks.
+
+I also included example programs
+demonstrating how the new functions
+could be used together with existing
+language features.
+
+The functions follow the native
+calling convention introduced in
+Challenge 3 and use the arity
+checking added in Challenge 2.
+
+Overall, I think adding native
+functions makes Lox more practical
+because it allows programmers to
+access useful functionality without
+having to build every operation
+from scratch.
+
+This is a proposed implementation
+based on Chapter 24. It has not
+been compiled or tested against
+the complete clox source code.
