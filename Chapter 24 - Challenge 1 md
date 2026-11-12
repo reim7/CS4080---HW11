@@ -500,35 +500,3 @@ Based on the proposed solution's
 reported performance improvement,
 I think the optimization offers
 a reasonable trade-off.
-
-## Conclusion
-
-For this challenge, I optimized the
-proposed clox VM by caching the
-instruction pointer in a local
-register variable.
-
-I updated the instruction-reading
-macros, jump instructions, function
-calls, returns, runtime error handling,
-and debug tracing to use the
-cached instruction pointer.
-
-I also designed two benchmarks:
-recursive Fibonacci and repeated
-loop execution.
-
-The provided solution reports an
-approximately 8.5% speedup for
-Fibonacci on its author's machine,
-but I have not independently
-verified that result.
-
-Overall, I think this optimization
-is worth considering because it
-targets an operation performed
-throughout bytecode execution.
-
-The implementation and benchmarks
-have not been compiled or executed
-as part of this submission.
